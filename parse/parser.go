@@ -6,106 +6,129 @@ import (
 )
 
 type SyntaxTree struct {
-  Value token.Token
+  Value *token.Token
   Children []*SyntaxTree
 }
 
+func (s *SyntaxTree) String() string {
+  str := ""
+  str += fmt.Sprintf("%s %v", s.Value.Value, s.Children)
+  return str
+}
+
+const (
+  MAX_ERROR = 20
+)
+
 type Parser struct {
-  Input chan token.Token
-  stack []*SyntaxTree
-  State StateFunc
+  Input <-chan *token.Token
 }
 
-func (s *SyntaxTree) Append(t *SyntaxTree) {
-  s.Children = append(s.Children, t)
+type ShuntingYard struct {
+  Input <-chan *token.Token
+  stack []*token.Token
 }
 
-// Pushes a SyntaxTree onto the stack,
-// setting it as root if root is nil
-func (p *Parser) Push(s *SyntaxTree) {
-  p.stack = append(p.stack, st)
-}
-
-// Pops a SyntaxTree from the stack
-func (p *Parser) Pop() *SyntaxTree {
-  if len(p.stack) > 0 {
-    s := p.stack[len(p.stack)-1]
-    p.stack = p.stack[:len(p.stack)-1]
-    return s
-  }
-  return nil
-}
-
-type StateFunc func(*Parser)StateFunc
-
-func letTypeState(p *Parser) StateFunc {
-  // Expecting type
-  t := <-p.Input
-  if t.Type() == token.TYPE {
-    k := t.(token.TypeToken)
-    if k != nil {
-      select k.Typ {
-      case token.TYPE_TUPLE:
-        return letTupleState
-      default:
-        // Expect '=' keyword
-
+func (y *ShuntingYard) shunt() <-chan *token.Token {
+  c := make(chan *token.Token)
+  go func(){
+    for t := range y.Input {
+      fmt.Printf("'%s': %s\n", t.Value, y.stack)
+      switch {
+      case t.Type == token.ERROR:
+        fmt.Printf("Error: %s\n", t.Value)
+      case t.Type == token.INVALID:
+        fmt.Printf("Encountered Invalid Token: '%s'\n", t.Value)
+      case t.Type == token.INTEGER || t.Type == token.FLOAT || t.Type == token.IDENT:
+        c <- t
+      case t.Type == token.FUNC:
+        y.stack = append(y.stack, t)
+      case t.Type.IsOperator():
+        for len(y.stack) > 0 {
+          st := y.stack[len(y.stack)-1]
+          if st.Type.IsOperator() {
+            if (t.Type.Assoc() == token.LEFT_ASSOC && t.Type.Prec() <= st.Type.Prec()) || (t.Type.Assoc() == token.RIGHT_ASSOC && t.Type.Prec() < st.Type.Prec()) {
+              c <- st
+              y.stack = y.stack[:len(y.stack)-1]
+              continue
+            }
+          }
+          break
+        }
+        y.stack = append(y.stack, t)
+      case t.Type == token.LPAREN:
+        y.stack = append(y.stack, t)
+      case t.Type == token.RPAREN:
+        hasFound := false
+        hasOther := 0
+        for len(y.stack) > 0 {
+          st := y.stack[len(y.stack)-1]
+          y.stack = y.stack[:len(y.stack)-1]
+          if st.Type == token.LPAREN {
+            hasFound = true
+            if len(y.stack) > 0 && y.stack[len(y.stack)-1].Type == token.FUNC {
+                c <- y.stack[len(y.stack)-1]
+                y.stack = y.stack[:len(y.stack)-1]
+            } else if hasOther == 0 {
+              // HACK HACK HACK
+              // empty tuple, null field or something?
+              c <- &token.Token{ Type: token.EMPTY, Value: "()" }
+            }
+            break
+          } else {
+            hasOther += 1
+            c <- st
+          }
+        }
+        if !hasFound {
+          panic("Mismatched parenthesis")
+        }
       }
     }
-  }
-  fmt.Printf("Expected type, found %#v\n", t)
-}
-
-func letStatementState(p *Parser) StateFunc {
-  // Expecting ':' or '=' keyword
-  t := <-p.Input
-  if t.Type() == token.KEYWORD {
-    k := t.(token.KeywordToken)
-    if k != nil {
-      select k.Keyword {
-      case token.KEYWORD_ASSIGN:
-        s := p.Pop()
-
-        p.PushLast(&SyntaxTree{ Value: t })
-        return letAssignState
-      case token.KEYWORD_TYPE:
-        p.Push(&SyntaxTree{ Value: t })
-        return letTypeState
+    // EOF
+    for len(y.stack) > 0 {
+      st := y.stack[len(y.stack)-1]
+      if st.Type == token.RPAREN {
+        panic("Mismatched parenthesis")
       }
-    }
-  }
-  fmt.Printf("Expected keyword ':' or '=', found %#v\n", t)
-  return nil
-}
-
-func startState(p *Parser) StateFunc {
-  // Expecting 'let' keyword
-  t := <-p.Input
-  if t.Type() == token.KEYWORD {
-    k := t.(token.KeywordToken)
-    if k != nil && k.Keyword == token.KEYWORD_LET {
-      p.Push(&SyntaxTree{ Value: t })
-      return letStatementState
-    }
-  }
-  fmt.Printf("Expected keyword 'let', found %#v\n", t)
-  return nil
-}
-
-func (p *Parser) SyntaxTreeGenerator() chan *SyntaxTree {
-  c := make(chan *SyntaxTree)
-  go func(chan *SyntaxTree) {
-    l.State = startState
-    for l.State != nil {
-      l.State = l.State(p)
+      c <- st
+      y.stack = y.stack[:len(y.stack)-1]
     }
     close(c)
-  }(c)
+  }()
   return c
 }
 
-func (p *Parser) Parse() {
-  for c := range p.SyntaxTreeGenerator() {
-    fmt.Println(c)
+func (y *ShuntingYard) Shunt() []*SyntaxTree {
+  stack := []*SyntaxTree{}
+  for t := range y.shunt() {
+    switch {
+    case t.Type.IsOperator():
+      s := make([]*SyntaxTree, 2)
+      copy(s, stack)
+      st := &SyntaxTree{ Value: t, Children: s }
+      if len(stack) > 2 {
+        stack = stack[2:]
+      } else {
+        stack = []*SyntaxTree{}
+      }
+      stack = append(stack, st)
+    case t.Type == token.FUNC:
+      // Parent tuple
+      st := &SyntaxTree{ Value: t }
+      if len(stack) > 0 {
+        st.Children = stack[:1]
+        stack = stack[1:]
+      }
+      stack = append(stack, st)
+    default:
+      stack = append(stack, &SyntaxTree{ Value: t })
+    }
   }
+  return stack
+}
+
+func (p *Parser) Parse() []*SyntaxTree {
+  sy := &ShuntingYard{ Input: p.Input }
+  return sy.Shunt()
 }

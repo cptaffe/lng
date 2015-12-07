@@ -11,7 +11,8 @@ type Lexer struct {
   State StateFunc
   lexed []rune
   back []rune
-  toks chan token.Token
+  eof bool
+  toks chan *token.Token
   parenDepth int
 }
 
@@ -21,6 +22,9 @@ func (l *Lexer) next() rune {
   if len(l.back) > 0 {
     c := l.back[len(l.back)-1]
     l.back = l.back[:len(l.back)-1]
+    if c == 0 {
+      l.eof = true
+    }
     return c
   }
   return <-l.Input
@@ -37,9 +41,11 @@ func (l *Lexer) Ignore() rune {
 }
 
 func (l *Lexer) Back() {
-  if len(l.lexed) > 0 {
-    l.back = append(l.back, l.lexed[len(l.lexed)-1])
-    l.lexed = l.lexed[:len(l.lexed)-1]
+  if !l.eof {
+    if len(l.lexed) > 0 {
+      l.back = append(l.back, l.lexed[len(l.lexed)-1])
+      l.lexed = l.lexed[:len(l.lexed)-1]
+    }
   }
 }
 
@@ -65,7 +71,7 @@ func (l *Lexer) IgnoreUpTo(pred RunePredicate) rune {
   }
 }
 
-func (l *Lexer) Emit(t token.Token) {
+func (l *Lexer) Emit(t *token.Token) {
   l.toks <- t
   l.lexed = []rune{}
 }
@@ -78,8 +84,8 @@ func (l *Lexer) Lexed() string {
   return s
 }
 
-func (l *Lexer) TokenGenerator() chan token.Token {
-  l.toks = make(chan token.Token)
+func (l *Lexer) TokenGenerator() <-chan *token.Token {
+  l.toks = make(chan *token.Token)
   go func(l *Lexer) {
     // state machine
     l.State = startState
